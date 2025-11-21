@@ -1,0 +1,78 @@
+1. Proses penyimpanan file ke lokasi akhir berdasarkan URI yang diberikan ke aplikasi kamera ditangani oleh fungsi registerForActivityResult di MainActivity dan metode insertImageToStore pada ProviderFileManager.
+
+// Di MainActivity.kt, ini adalah pemicu setelah kamera selesai
+takePictureLauncher =
+    registerForActivityResult(ActivityResultContracts.TakePicture()) {
+        providerFileManager.insertImageToStore(photoInfo)
+    }
+
+// Di ProviderFileManager.kt, ini adalah metode yang memulai proses penyalinan
+fun insertImageToStore(fileInfo: FileInfo?) {
+    fileInfo?.let {
+        insertToStore(
+            fileInfo,
+            mediaContentHelper.getImageContentUri(),
+            mediaContentHelper.generateImageContentValues(it)
+        )
+    }
+}
+
+// Di ProviderFileManager.kt, ini adalah fungsi inti yang menyalin file
+private fun insertToStore(
+    fileInfo: FileInfo,
+    contentUri: Uri,
+    contentValues: ContentValues
+) {
+    executor.execute {
+        val insertedUri = contentResolver.insert(contentUri, contentValues)
+
+        insertedUri?.let {
+            val inputStream = contentResolver.openInputStream(fileInfo.uri) // URI file sementara (dari kamera)
+            val outputStream = contentResolver.openOutputStream(insertedUri) // URI lokasi akhir di MediaStore
+
+            // Copy the file content from the temporary location to MediaStore's location
+            IOUtils.copy(inputStream, outputStream)
+        }
+    }
+}
+
+
+2. URI (Uniform Resource Identifier) pada atribut pertama yang dibuat oleh FileHelper.getUriFromFile() merujuk pada URI konten sementara (Content URI) yang digunakan untuk:
+- Memberitahu aplikasi kamera di mana harus menyimpan hasil foto (file gambar).
+- URI ini dihasilkan oleh FileProvider dan menunjuk ke lokasi file sementara (context.getExternalFilesDir(...)) yang hanya dapat diakses oleh aplikasi Anda.
+- URI ini penting karena Android modern melarang aplikasi lain (seperti kamera) mengakses jalur file secara langsung (file://).
+
+Atribut relativePath merujuk pada jalur atau sub-folder tempat file akan disimpan di dalam penyimpanan eksternal yang diatur oleh MediaStore setelah proses penyalinan selesai (untuk Android 10/Q ke atas).
+- Nilainya diambil dari Environment.DIRECTORY_PICTURES atau Environment.DIRECTORY_MOVIES.
+- Contohnya, jika relativePath adalah "Pictures/AplikasiSaya/", maka file akan berakhir di <External Storage>/Pictures/AplikasiSaya/.
+- Ini adalah bagian dari ContentValues yang memberitahu MediaStore di mana harus membuat lokasi permanen untuk file tersebut.
+
+
+3. 
+Langkah 1: Pemicu dan Persiapan URI (Main Thread)
+	1. Pengguna mengklik tombol "Photo".
+	2. MainActivity memanggil checkStoragePermission (melewati izin jika Android Q+ atau meminta izin jika Android < Q).
+	3. checkStoragePermission memanggil openImageCapture().
+	4. openImageCapture() memanggil providerFileManager.generatePhotoUri().
+	5. generatePhotoUri() membuat:
+	- Objek File sementara di lokasi getExternalFilesDir(Environment.DIRECTORY_PICTURES)
+	- URI FileProvider (Content URI sementara) yang menunjuk ke file sementara tersebut.
+	- Objek FileInfo yang berisi URI sementara ini.
+	6. openImageCapture() memanggil takePictureLauncher.launch(photoInfo?.uri), mengirimkan URI FileProvider sementara ke aplikasi kamera. 
+
+Langkah 2: Pengambilan Gambar (Aplikasi Kamera)
+	7. Aplikasi Kamera terbuka dan mengambil foto.
+	8. Setelah pengguna menekan tombol capture dan OK, aplikasi kamera menyimpan hasil foto ke URI yang telah diberikan (URI FileProvider sementara) dan menutup.
+
+Langkah 3: Penyimpanan ke MediaStore (Background/Executor)
+	9. MainActivity menerima hasil dari takePictureLauncher dan memanggil providerFileManager.insertImageToStore(photoInfo).
+	10. insertImageToStore memanggil insertToStore di background thread (menggunakan executor.execute):
+	- Aplikasi meminta URI permanen dari MediaStore dengan memanggil contentResolver.insert(contentUri, contentValues).
+	- contentValues berisi metadata seperti DISPLAY_NAME, MIME_TYPE, dan RELATIVE_PATH (folder permanen) yang diambil dari FileInfo.
+	- MediaStore mengembalikan insertedUri (URI permanen) yang menunjuk ke lokasi penyimpanan publik yang baru.
+	11. insertToStore membuka:
+	- InputStream dari file sementara menggunakan fileInfo.uri (lokasi di Langkah 5).
+	- OutputStream ke URI permanen menggunakan insertedUri (lokasi di Langkah 10).
+	12. IOUtils.copy(inputStream, outputStream) menyalin konten gambar byte-demi-byte dari lokasi sementara aplikasi ke lokasi permanen MediaStore.
+	13. Setelah penyalinan selesai, file gambar kini tersimpan secara permanen di penyimpanan publik dan terdaftar dalam database MediaStore, siap diakses oleh aplikasi galeri lainnya.
+
